@@ -187,12 +187,6 @@ A cluster of conceptual questions, mostly answered directly rather than via hand
 
 ---
 
-## Phase 8 — Confluent certificate placement
-
-- Discussed where to surface the completed Confluent accreditation: primarily **LinkedIn** (Licenses & Certifications — searchable by recruiters), also the project **README** (as a verified badge/link, not an uploaded certificate file), and the **GitHub profile README**. Decided against committing the certificate file itself into the repo.
-
----
-
 ## Open items / not yet confirmed
 
 - Whether `start.sh` was ever actually patched with the `docker exec kafka` prefix fix for its readiness-check loop.

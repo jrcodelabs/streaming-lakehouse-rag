@@ -19,7 +19,7 @@ Reboot Windows after installation completes. This installs Ubuntu by default and
 After reboot, open the **Ubuntu** app from the Start menu to complete first-time setup (create a Linux username/password). The shell prompt will look like:
 
 ```
-jubyk@DESKTOP-GL7Q6E7:~$
+user@hostname:~$
 ```
 
 ### 1.2 Install Docker Desktop
@@ -334,8 +334,6 @@ Key troubleshooting fix applied to `labs/exploring/docker-compose.yml` — the C
 ```yaml
 KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
 ```
-
-✅ Completed the accreditation exam (30/30 questions) and earned the certificate — added to LinkedIn under Licenses & Certifications.
 
 ---
 
