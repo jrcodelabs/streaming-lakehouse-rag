@@ -6,7 +6,7 @@ A chronological record of the actual build process: what was set up, what broke,
 
 ---
 
-## Phase 1 — Planning & environment groundwork (~Aug 14)
+## Phase 1 — Planning & environment groundwork
 
 - Defined the 8-week capstone plan (Kafka → Databricks → dbt → RAG → Streamlit) and confirmed scope: hands-on, free, ~10–15 hrs/week, one integrated project using a general public dataset.
 - Chose a GitHub handle/profile name and created the public repo `streaming-lakehouse-rag` under account `jrcodelabs`.
@@ -127,7 +127,7 @@ A cluster of conceptual questions, mostly answered directly rather than via hand
 
 ---
 
-## Phase 6 — Back to the capstone repo: scaffolding & Python environment (~Oct 3–5)
+## Phase 6 — Back to the capstone repo: scaffolding & Python environment
 
 - Verified Docker/Git were present and working (`docker ps`, `docker --version`, `git --version`).
 - Confirmed Python 3.14 was already available in WSL2 via `apt` (not something separately installed in this session).
