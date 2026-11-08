@@ -142,6 +142,7 @@ Activate this any time you work on the project (prompt shows `(.venv)` when acti
 
 ```bash
 pip install pandas pyarrow kafka-python python-dotenv
+requirements.txt is now the source of truth going forward — rebuilding from scratch should use pip install -r requirements.txt instead of retyping the package list, since that’s what actually reflects what’s installed now.
 ```
 
 - `pandas` + `pyarrow` — read the NYC Taxi Parquet files
@@ -215,10 +216,11 @@ docker compose up -d
 docker ps   # confirm 'redpanda' and 'redpanda-console' are both Up
 ```
 
-### 6.3 Create the topic
+### 6.3 Create the topics
 
 ```bash
 docker exec -it redpanda rpk topic create taxi-trips --partitions 3
+docker exec -it redpanda rpk topic create trip-completed --partitions 3
 docker exec -it redpanda rpk topic list
 ```
 
@@ -230,40 +232,63 @@ Visit `http://localhost:8080` in a Windows browser to visually inspect topics an
 
 ## 7. Python Producer Script
 
-`producer/produce_trips.py` — reads the taxi Parquet files and streams each row as a JSON event to the `taxi-trips` topic, throttled to simulate real-time arrival:
+`producer/produce_trips.py` — reads the taxi Parquet files and streams each trip as **two correlated events**, keyed by the same `trip_id` so they co-partition for a later stream-stream join: a "trip started" event (pickup data) to `taxi-trips`, and a "trip completed" event (dropoff data) to `trip-completed`.
 
 ```python
-"""
-Reads NYC taxi trip Parquet files and streams each row as a JSON event
-to the 'taxi-trips' Kafka topic, throttled to simulate real-time arrival.
-"""
 import json
 import time
 import glob
+import uuid
 import pandas as pd
 from kafka import KafkaProducer
 
 BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "taxi-trips"
+STARTED_TOPIC = "taxi-trips"
+COMPLETED_TOPIC = "trip-completed"
 DATA_DIR = "data/raw"
-THROTTLE_SECONDS = 0.05  # delay between each event, adjust to speed up/slow down
+THROTTLE_SECONDS = 0.05
 
 producer = KafkaProducer(
     bootstrap_servers=BOOTSTRAP_SERVERS,
+    key_serializer=lambda k: k.encode("utf-8"),
     value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
 )
+
+def build_started_event(trip_id, row):
+    return {
+        "trip_id": trip_id,
+        "vendor_id": row.get("VendorID"),
+        "pickup_datetime": row.get("tpep_pickup_datetime"),
+        "pickup_location_id": row.get("PULocationID"),
+        "passenger_count": row.get("passenger_count"),
+    }
+
+def build_completed_event(trip_id, row):
+    return {
+        "trip_id": trip_id,
+        "dropoff_datetime": row.get("tpep_dropoff_datetime"),
+        "dropoff_location_id": row.get("DOLocationID"),
+        "trip_distance": row.get("trip_distance"),
+        "fare_amount": row.get("fare_amount"),
+        "tip_amount": row.get("tip_amount"),
+        "total_amount": row.get("total_amount"),
+        "payment_type": row.get("payment_type"),
+    }
 
 def stream_file(filepath):
     print(f"Reading {filepath} ...")
     df = pd.read_parquet(filepath)
-    print(f"  {len(df)} rows found. Streaming to topic '{TOPIC}' ...")
+    print(f"  {len(df)} rows found. Streaming started+completed events ...")
 
     for i, row in df.iterrows():
-        event = row.to_dict()
-        producer.send(TOPIC, value=event)
+        row_dict = row.to_dict()
+        trip_id = str(uuid.uuid4())
+
+        producer.send(STARTED_TOPIC, key=trip_id, value=build_started_event(trip_id, row_dict))
+        producer.send(COMPLETED_TOPIC, key=trip_id, value=build_completed_event(trip_id, row_dict))
 
         if i % 1000 == 0:
-            print(f"  sent {i} events so far...")
+            print(f"  sent {i} trip pairs so far...")
 
         time.sleep(THROTTLE_SECONDS)
 
@@ -271,7 +296,7 @@ def stream_file(filepath):
     print(f"  done with {filepath}")
 
 if __name__ == "__main__":
-    files = sorted(glob.glob(f"{DATA_DIR}/*.parquet"))
+    files = sorted(glob.glob(f"{DATA_DIR}/*2025-01.parquet"))
     if not files:
         print(f"No parquet files found in {DATA_DIR}/")
     else:
@@ -282,20 +307,40 @@ if __name__ == "__main__":
     print("All files streamed.")
 ```
 
-**Run it:**
+**Note:** `DATA_DIR` is relative — always run this from the **project root**, not from `producer/`, or it won't find the data. The glob pattern (`*2025-01.parquet`) is also intentionally narrow — it only streams the January file even if February/March Parquet files are present in `data/raw/`.
+
+For a quick local test without a full backfill, add one line after the `pd.read_parquet` call: `df = df.head(10)` — streams 10 trip pairs (20 messages total) in under a second. Remove it for a real full-file run.
+
+---
+
+## 7.5 Python Consumer Script
+
+`consumer/consume_trips.py` — the minimal working consumer against `taxi-trips`:
+
+```python
+from kafka import KafkaConsumer
+
+consumer = KafkaConsumer(
+    "taxi-trips",
+    bootstrap_servers="localhost:9092",
+    group_id="trip-reader-v1",
+    auto_offset_reset="earliest",
+)
+
+for message in consumer:
+    print(message.value)
+```
+
+Two settings matter here, and skipping either one causes the consumer to hang indefinitely waiting for messages that will never come:
+- `group_id` — gives the consumer a persistent identity so Kafka/Redpanda can remember the last offset it read, per partition, and resume from there on the next run instead of starting over (or starting from nothing).
+- `auto_offset_reset="earliest"` — only matters the *first* time a given `group_id` runs with no stored offset yet; it decides whether to start from the beginning of the topic (`earliest`) or only show messages produced from now on (`latest`, the default — effectively a tail/follow mode).
+
+Run it:
 ```bash
 source .venv/bin/activate
-python producer/produce_trips.py
+python consumer/consume_trips.py
 ```
-
-**Verify events landed**, two ways:
-```bash
-# Option A: command-line consumer
-docker exec -it redpanda rpk topic consume taxi-trips
-
-# Option B: Redpanda Console UI
-# http://localhost:8080 -> Topics -> taxi-trips -> Messages
-```
+It runs forever by design (a real streaming consumer never "finishes") — Ctrl+C to stop it.
 
 ---
 
@@ -339,12 +384,8 @@ KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
 
 ## Useful commands reference
 
-| Task | Command |
-|---|---|
-| Start Kafka | `cd kafka && docker compose up -d` |
-| Stop Kafka | `cd kafka && docker compose down` |
-| List topics | `docker exec -it redpanda rpk topic list` |
-| Consume a topic | `docker exec -it redpanda rpk topic consume taxi-trips` |
-| Activate venv | `source .venv/bin/activate` |
-| Update requirements.txt | `pip freeze > requirements.txt` |
-| Check Docker is running | `docker ps` |
+| Check which venv is actually active | `echo $VIRTUAL_ENV` |
+| Install pinned dependencies (not individual packages) | `pip install -r requirements.txt` |
+| Describe a topic's partitions/offsets | `docker exec -it redpanda rpk topic describe <topic> -p` |
+| Consume from the beginning of a topic | `docker exec -it redpanda rpk topic consume <topic> -n 5 --offset oldest` |
+| Run the consumer | `python consumer/consume_trips.py` |
