@@ -48,6 +48,7 @@ def build_completed_event(trip_id, row):
 def stream_file(filepath):
     print(f"Reading {filepath} ...")
     df = pd.read_parquet(filepath)
+    df = df.head(10)  # cap for a quick test run — delete this line for the real capstone load
     print(f"  {len(df)} rows found. Streaming started+completed events ...")
 
     for i, row in df.iterrows():
