@@ -187,8 +187,78 @@ A cluster of conceptual questions, mostly answered directly rather than via hand
 
 ---
 
+## Phase 8 — Resuming after a ~1-month gap: retention, venv drift, and the first consumer
+
+- Resumed work after roughly a month of inactivity on the capstone; this phase surfaced three separate "cold start" problems before any new building happened, each with its own root cause.
+- **Note:** by this point `producer/produce_trips.py` had already evolved from the single-topic version documented in Phase 7 to a dual-topic design — one `trip_id`-keyed "started" event to `taxi-trips` and a correlated "completed" event to a new `trip-completed` topic, intended for a later stream-stream join. This change wasn't previously logged in this journal or `setup.md`.
+
+### Redpanda retention expired the old data
+- Ran `docker exec -it redpanda rpk topic consume taxi-trips -n 5` to sanity-check the topic — **hung indefinitely**.
+- Retried with `--offset start` — **hung again**. Root cause for this retry specifically: `start` isn't a valid `rpk` offset value (the real options are `oldest`/`newest`); it likely silently fell back to the default tail behavior.
+- Diagnosed properly via `docker exec -it redpanda rpk topic describe taxi-trips -p`: `LOG-START-OFFSET` equaled `HIGH-WATERMARK` on every partition (e.g. `378261`/`378261`), meaning zero messages currently retained — but the offset numbers themselves (all in the 378k range) proved 378k+ messages had been produced historically.
+  **Fix:** not a config fix — just confirmation that Redpanda's default 7-day retention had cleaned up everything from a month-old test run. Needed fresh data, not a different flag.
+
+### Producer fixes needed to generate fresh data
+- Capped the producer to a quick 10-row test run instead of a full backfill:
+  ```bash
+  sed -i '/df = pd.read_parquet(filepath)/a\    df = df.head(10)  # cap for a quick test run — delete this line for the real capstone load' produce_trips.py
+  ```
+- **Error hit:** running `python produce_trips.py` from inside `producer/` printed `No parquet files found in data/raw/` and exited without sending anything.
+  **Root cause:** `DATA_DIR = "data/raw"` in the script is a relative path, resolved against the current working directory — it needed to be run from the project root, not from `producer/`.
+  **Fix:** `cd ~/projects/streaming-lakehouse-rag && python producer/produce_trips.py`.
+- **Noted but not yet fixed:** the producer's glob pattern (`*2025-01.parquet`) only ever matches the January file by design — `2025-02`/`2025-03` are silently excluded. Not a bug for this session's purposes, but worth knowing before a full backfill. *(Recommended follow-up, not yet applied: anchor `DATA_DIR` to the script's own file location with `pathlib` instead of the current working directory, so it isn't sensitive to which folder you run it from.)*
+- Confirmed the fresh data landed by re-running `rpk topic describe` (watermark advanced past the old `378261` baseline) and `rpk topic consume taxi-trips -n 5 --offset oldest` (returned real JSON pickup events at the new offsets).
+
+### Virtual environment drift
+- `python produce_trips.py` initially failed with `ModuleNotFoundError: No module named 'pandas'`, despite the shell prompt showing `(.venv)`.
+- **Root cause:** the active venv was `/home/jubyk/.venv` — a *different*, home-directory-level venv (unrelated packages: `groq`, `pydantic`, `httpx`), not the project-local one. The shell prompt only shows a venv's folder basename, so two different `.venv` folders look identical in the prompt.
+- Confirmed via `echo $VIRTUAL_ENV` (prints the full path, unambiguous) and traced the correct location by rereading this journal/`setup.md` (Phase 6: `python3 -m venv .venv` run from the project root; Phase 7: `pandas`/`pyarrow`/`kafka-python` installed into it).
+  **Fix:**
+  ```bash
+  deactivate
+  source ~/projects/streaming-lakehouse-rag/.venv/bin/activate
+  ```
+- Since no `requirements.txt` existed yet (confirmed by rereading this journal), captured one immediately after fixing the venv:
+  ```bash
+  pip freeze > requirements.txt
+  git add requirements.txt
+  git commit -m "Pin project dependencies"
+  ```
+  *(Not confirmed merged to `main` yet.)*
+
+### Git workflow applied to this session's changes
+- Branched before editing, per the Phase 6 habit: `git checkout -b feature/producer-row-cap`.
+- Two separate commits on that branch: the producer row-cap, and a broadened `.gitignore` (`*.db`, `*.sqlite3` — generic SQLite coverage, since `db.sqlite3` in the existing template only matches Django's default filename).
+- Pushed the branch and discussed `gh pr create --fill` to open the PR from commit messages directly. *(Not confirmed whether the PR was actually opened/merged.)*
+
+### First Kafka consumer (`kafka-python`)
+- Wrote the smallest possible consumer against `taxi-trips`:
+  ```python
+  from kafka import KafkaConsumer
+
+  consumer = KafkaConsumer("taxi-trips", bootstrap_servers="localhost:9092")
+
+  for message in consumer:
+      print(message.value)
+  ```
+- **Symptom:** hung with no output — same shape as the earlier `rpk` hang. **Root cause:** no `group_id` (anonymous consumer, nothing to resume from) combined with the default `auto_offset_reset="latest"` (start from the *end* of the log when there's no stored position).
+  **Fix:**
+  ```python
+  consumer = KafkaConsumer(
+      "taxi-trips",
+      bootstrap_servers="localhost:9092",
+      group_id="trip-reader-v1",
+      auto_offset_reset="earliest",
+  )
+  ```
+- Ran it twice to observe consumer-group offset persistence: first run printed the 10 records then sat waiting (expected — `KafkaConsumer` in a `for` loop runs forever by design); second run (same `group_id`, no code changes) printed **nothing** and went straight to waiting, confirming Kafka/Redpanda tracks the last-committed offset per `group_id` per partition internally (`__consumer_offsets`) and resumes from there rather than re-applying `auto_offset_reset`.
+- ✅ Milestone: first working consumer against the capstone's live topic, with the "why would this hang" and "why didn't it re-read" gotchas both demonstrated hands-on rather than just explained.
+- **Deferred to next session:** running two consumer processes under the same `group_id` simultaneously, to observe partition assignment/work-sharing (motivated by noticing the 10 test messages landed across partitions `0` and `1`).
+
+---
+
 ## Open items / not yet confirmed
 
-- Whether `start.sh` was ever actually patched with the `docker exec kafka` prefix fix for its readiness-check loop.
-- Whether `sample-topic`'s partition count was ever checked to fully explain the "scrambled order" observation.
-- Exact completion date of the Confluent accreditation (for dating the README/LinkedIn entries).
+- Whether the `feature/producer-row-cap` PR (gitignore broadening + producer row cap + `requirements.txt`) was actually merged to `main`.
+- Whether `produce_trips.py`'s `DATA_DIR` was ever made robust to working directory (the `pathlib`-based fix).
+- Multi-consumer / partition-rebalance experiment under the same `group_id` — not yet run.
